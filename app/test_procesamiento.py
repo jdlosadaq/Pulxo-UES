@@ -1,7 +1,7 @@
 import numpy as np
 
 from lector import FS
-from procesamiento import frecuencia_cardiaca, spo2
+from procesamiento import frecuencia_cardiaca, indice_perfusion, spo2
 
 t = np.arange(30 * FS) / FS
 ruido = np.random.default_rng(0).normal(0, 30, (2, t.size))
@@ -14,5 +14,8 @@ for lpm in (40, 72, 150):
 
     assert abs(frecuencia_cardiaca(ir) - lpm) < 2, lpm
     assert abs(spo2(rojo, ir) - 97.5) < 0.5, lpm
+
+seno = 60000 + 600 * np.sin(2 * np.pi * 72 / 60 * t) + ruido[1]
+assert abs(indice_perfusion(seno) - 2.0) < 0.1
 
 print("OK")
