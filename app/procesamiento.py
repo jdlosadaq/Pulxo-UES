@@ -6,6 +6,7 @@ from scipy.signal import butter, correlate, filtfilt
 from lector import FS
 
 A, B = 110, 25
+BANDA = (0.5, 4)
 
 
 def cargar(ruta):
@@ -14,7 +15,7 @@ def cargar(ruta):
 
 
 def pasabanda(x):
-    b, a = butter(2, [0.5, 4], btype="band", fs=FS)
+    b, a = butter(2, BANDA, btype="band", fs=FS)
     return filtfilt(b, a, x)
 
 
@@ -28,6 +29,10 @@ def frecuencia_cardiaca(ir):
 def spo2(rojo, ir):
     r = (np.std(pasabanda(rojo)) / np.mean(rojo)) / (np.std(pasabanda(ir)) / np.mean(ir))
     return A - B * r
+
+
+def indice_perfusion(ir):
+    return 100 * np.ptp(pasabanda(ir)[FS:-FS]) / np.mean(ir)
 
 
 if __name__ == "__main__":
