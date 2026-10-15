@@ -5,4 +5,7 @@ __pycache__/
 build/
 
 sesiones/
-docs/fundamentos_fisicos_captura.pdf
+docs/*.pdf
+
+reports/
+research_notes/
