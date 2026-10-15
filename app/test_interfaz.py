@@ -35,6 +35,9 @@ assert abs(float(panel.valor_sat.text()) - 97.5) <= 1, panel.valor_sat.text()
 assert abs(float(panel.valor_pi.text()) - 4.0) < 0.2, panel.valor_pi.text()
 assert "Midiendo" in panel.estado.text(), panel.estado.text()
 
+pleth = panel.curva.getData()[1][-5 * FS:]
+assert np.corrcoef(pleth, -pulso[-5 * FS:])[0, 1] > 0.9
+
 with open(next(Path("sesiones").glob("*.csv")), newline="") as archivo:
     filas = list(csv.reader(archivo))
 assert filas[0] == ["n", "rojo", "ir"]
