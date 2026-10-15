@@ -55,7 +55,7 @@ Antes de empezar, cierra el Monitor Serie del Arduino IDE, porque el puerto solo
 
 | Comando | Qué hace |
 |---|---|
-| `python app/interfaz.py COM5` | Abre el panel en vivo: señales roja e infrarroja, FC, SpO2, PI y tendencias del último minuto. **Grabar** guarda la sesión en `sesiones/`. |
+| `python app/interfaz.py COM5` | Abre el panel en vivo: pletismograma (curva de pulso), FC, SpO2, PI y tendencias del último minuto. **Grabar** guarda la sesión en `sesiones/`. |
 | `python app/lector.py COM5` | Graba la sesión en un CSV de `sesiones/` sin interfaz. Se termina con Ctrl+C. |
 | `python app/procesamiento.py sesiones/<archivo>.csv` | Calcula la FC y la SpO2 de una grabación. |
 
@@ -77,7 +77,8 @@ La carpeta `sesiones/` no se sube al repositorio, porque contiene datos de salud
 
 ## Procesamiento
 
-- **Filtro:** pasa-banda Butterworth de orden 4, con −6 dB en 0.5 y 4 Hz (30 y 240 lpm). Para los cálculos se aplica en ambos sentidos (fase cero); en las gráficas en vivo, en un solo sentido. Separa el pulso del nivel continuo, de la respiración y del ruido rápido.
+- **Filtro de cálculo:** pasa-banda Butterworth de orden 4, con −6 dB en 0.5 y 4 Hz (30 y 240 lpm), aplicado en ambos sentidos (fase cero). Separa el pulso del nivel continuo, de la respiración y del ruido rápido.
+- **Pletismograma:** curva del canal infrarrojo, invertida para que la sístole quede hacia arriba y filtrada en tiempo real con un pasa-altos de primer orden en 0.5 Hz y un pasa-bajos Butterworth de orden 2 en 8 Hz, con un retraso de unas decenas de milisegundos. La banda más ancha que la de cálculo conserva la forma de la onda, incluida la muesca dícrota. Como en los monitores comerciales, se autoescala y no tiene escala vertical: la amplitud cuantitativa es el índice de perfusión.
 - **Frecuencia cardiaca:** FC = 60 · 100 / L, donde L es el retardo, en muestras, del máximo de la autocorrelación de la señal infrarroja filtrada, buscado entre 30 y 240 lpm. A diferencia del conteo de picos, no se confunde con la muesca dícrota, que da dos picos por latido. Como L es un número entero de muestras, el error de redondeo es como máximo ±FC²/12 000 lpm: ±0.3 lpm a 60 lpm y ±1.9 lpm a 150 lpm.
 - **SpO2:** R = (AC/DC rojo) / (AC/DC infrarrojo), donde AC es la desviación típica de la señal filtrada y DC la media de la señal sin filtrar. SpO2 = 110 − 25·R es la recta del diseño de referencia TIDA-00301 de Texas Instruments, basada en las curvas de calibración de Nellcor OxiMax (2003). No está calibrada para este sensor.
 - **Índice de perfusión:** pico a pico de la señal infrarroja filtrada, sin el primer ni el último segundo de la ventana, dividido entre la media de la señal sin filtrar y multiplicado por 100.

@@ -14,12 +14,12 @@ from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushBu
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from lector import BAUDIO, FS, muestras, simulador
-from procesamiento import BANDA, frecuencia_cardiaca, indice_perfusion, spo2
+from procesamiento import frecuencia_cardiaca, indice_perfusion, spo2
 
 VENTANA = 10 * FS
 TENDENCIA = 60
 DEDO_MINIMO = 50000
-SOS = butter(2, BANDA, btype="band", fs=FS, output="sos")
+SOS = np.vstack([butter(1, 0.5, btype="high", fs=FS, output="sos"), butter(2, 8, fs=FS, output="sos")])
 
 AZUL, ROJO, VERDE = "#4f8fe6", "#e5534b", "#57ab5a"
 ESTILO = """
@@ -72,8 +72,8 @@ class Panel(QWidget):
         barra.addWidget(self.boton)
         barra.addWidget(salir)
 
-        graf_rojo, self.curva_rojo = grafica("LED rojo (filtrada)", "cuentas", ROJO)
-        graf_ir, self.curva_ir = grafica("LED infrarrojo (filtrada)", "cuentas", AZUL)
+        graf_pleth, self.curva = grafica("Pletismograma (infrarrojo)", "", AZUL)
+        graf_pleth.hideAxis("left")
         caja_fc, self.valor_fc = tarjeta("Frecuencia cardiaca (lpm)", AZUL)
         caja_sat, self.valor_sat = tarjeta("SpO₂ (%) · sin calibrar", VERDE)
         caja_pi, self.valor_pi = tarjeta("Índice de perfusión (%)", "#d0d0d0")
@@ -82,10 +82,13 @@ class Panel(QWidget):
         graf_fc.setYRange(40, 160)
         graf_sat.setYRange(80, 100)
 
+        tendencias = QHBoxLayout()
+        tendencias.addWidget(graf_fc)
+        tendencias.addWidget(graf_sat)
         izquierda, derecha = QVBoxLayout(), QVBoxLayout()
-        izquierda.addWidget(graf_rojo)
-        izquierda.addWidget(graf_ir)
-        for elemento in (caja_fc, caja_sat, caja_pi, graf_fc, graf_sat):
+        izquierda.addWidget(graf_pleth, 2)
+        izquierda.addLayout(tendencias, 1)
+        for elemento in (caja_fc, caja_sat, caja_pi):
             derecha.addWidget(elemento)
         cuerpo = QHBoxLayout()
         cuerpo.addLayout(izquierda, 3)
@@ -113,17 +116,15 @@ class Panel(QWidget):
             return
         if self.escritor:
             self.escritor.writerows(nuevas)
-        datos = np.array(nuevas, dtype=float)[:, 1:]
+        datos = np.array(nuevas, dtype=float)
         if self.filtro is None:
-            self.filtro = sosfilt_zi(SOS)[:, :, None] * datos[0]
-        filtrados, self.filtro = sosfilt(SOS, datos, axis=0, zi=self.filtro)
-        self.rojo.extend(datos[:, 0])
-        self.ir.extend(datos[:, 1])
-        self.vista.extend(-filtrados)
-        vista = np.array(self.vista)
-        t = np.arange(-len(vista), 0) / FS
-        self.curva_rojo.setData(t, vista[:, 0])
-        self.curva_ir.setData(t, vista[:, 1])
+            self.filtro = sosfilt_zi(SOS) * datos[0, 2]
+        filtrado, self.filtro = sosfilt(SOS, datos[:, 2], zi=self.filtro)
+        self.rojo.extend(datos[:, 1])
+        self.ir.extend(datos[:, 2])
+        self.vista.extend(-filtrado)
+        t = np.arange(-len(self.vista), 0) / FS
+        self.curva.setData(t, np.array(self.vista))
 
     def calcular(self):
         self.hora.setText(f"{datetime.now():%H:%M:%S}")
