@@ -32,13 +32,17 @@ def muestras(lineas):
         yield m
 
 
+def onda_pulso(fase):
+    return math.exp(-((fase - 0.18) / 0.08) ** 2) + 0.5 * math.exp(-((fase - 0.55) / 0.11) ** 2) - 0.24
+
+
 def simulador(fc=72):
     n = 0
     inicio = time.perf_counter()
     while True:
-        pulso = math.sin(2 * math.pi * fc / 60 * n / FS)
-        rojo = 50000 + 500 * pulso + random.gauss(0, 30)
-        ir = 60000 + 1200 * pulso + random.gauss(0, 30)
+        pulso = onda_pulso(fc / 60 * n / FS % 1)
+        rojo = 50000 - 1000 * pulso + random.gauss(0, 30)
+        ir = 60000 - 2400 * pulso + random.gauss(0, 30)
         yield f"{n},{int(rojo)},{int(ir)}\r\n".encode()
         n += 1
         espera = inicio + n / FS - time.perf_counter()
