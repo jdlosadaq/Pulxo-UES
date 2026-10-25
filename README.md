@@ -59,6 +59,7 @@ Antes de empezar, cierra el Monitor Serie del Arduino IDE, porque el puerto solo
 | `python app/lector.py COM5` | Graba la sesión en un CSV de `sesiones/` sin interfaz. Se termina con Ctrl+C. |
 | `python app/procesamiento.py sesiones/<archivo>.csv` | Calcula la FC y la SpO2 de una grabación. |
 | `python app/validacion_bidmc.py datos/bidmc` | Compara la FC, el RMSSD y el SDNN calculados con el PPG contra los del ECG, con los registros de la base pública BIDMC (PhysioNet). Imprime sesgo, MAE, RMSE y r, y guarda los gráficos Bland-Altman en `validacion/`. |
+| `python app/apg_ppgbp.py "datos/ppgbp/Data File"` | Calcula la segunda derivada del pulso (APG) con los registros de la base pública PPG-BP, extrae los índices b/a y AGI y los correlaciona con la edad. Guarda los gráficos en `validacion/`. |
 
 La barra superior del panel indica el estado:
 - **Llenando ventana:** los primeros 10 s.
@@ -95,6 +96,7 @@ python app/test_lector.py
 python app/test_procesamiento.py
 python app/test_interfaz.py
 python app/test_validacion_bidmc.py
+python app/test_apg_ppgbp.py
 ```
 
 Cada prueba imprime `OK` si todo está bien.
@@ -107,6 +109,7 @@ app/lector.py           lectura del puerto serie y grabación en CSV
 app/procesamiento.py    filtrado, FC, SpO2 e índice de perfusión
 app/interfaz.py         panel en vivo
 app/validacion_bidmc.py comparación contra la base pública BIDMC
+app/apg_ppgbp.py        segunda derivada del pulso (b/a, AGI) contra la edad, con PPG-BP
 app/test_*.py           pruebas automáticas
 datos/                  bases públicas descargadas (no se suben al repositorio)
 validacion/             gráficos de la validación
