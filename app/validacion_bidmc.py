@@ -9,11 +9,11 @@ from PySide6.QtWidgets import QApplication
 from scipy.signal import butter, filtfilt, find_peaks, resample_poly
 
 from lector import FS
-from procesamiento import frecuencia_cardiaca, variabilidad
+from procesamiento import CALIDAD_MINIMA, calidad_senal, frecuencia_cardiaca, variabilidad
 
 SEGUNDOS_FC = 10
 SEGUNDOS_HRV = 60
-MEDIDAS = ("FC (lpm)", "RMSSD (ms)", "SDNN (ms)")
+MEDIDAS = ("FC (lpm)", "FC fiable (lpm)", "RMSSD (ms)", "SDNN (ms)")
 
 
 def leer_registro(base):
@@ -65,13 +65,15 @@ def evaluar(base):
     for t0 in range(0, ppg.size // FS - SEGUNDOS_FC + 1, SEGUNDOS_FC):
         referencia = fc_referencia(latidos[(latidos >= t0) & (latidos < t0 + SEGUNDOS_FC)])
         if referencia is not None:
-            medida = frecuencia_cardiaca(ppg[t0 * FS:(t0 + SEGUNDOS_FC) * FS])
+            ventana = ppg[t0 * FS:(t0 + SEGUNDOS_FC) * FS]
+            medida = frecuencia_cardiaca(ventana)
             pares["FC (lpm)"].append((referencia, medida))
+            pares["FC fiable (lpm)"].append((referencia, medida if calidad_senal(ventana) >= CALIDAD_MINIMA else None))
     for t0 in range(0, ppg.size // FS - SEGUNDOS_HRV + 1, SEGUNDOS_HRV):
         referencia = vfc_referencia(latidos[(latidos >= t0 + 1) & (latidos < t0 + SEGUNDOS_HRV - 1)])
         if referencia is not None:
             medida = variabilidad(ppg[t0 * FS:(t0 + SEGUNDOS_HRV) * FS]) or (None, None)
-            for nombre, r, m in zip(MEDIDAS[1:], referencia, medida):
+            for nombre, r, m in zip(MEDIDAS[2:], referencia, medida):
                 pares[nombre].append((r, m))
     return pares
 
@@ -118,16 +120,16 @@ if __name__ == "__main__":
 
     resultados = {medida: estadisticas(p) for medida, p in pares.items()}
     print(f"{len(registros)} registros de BIDMC")
-    print(f"{'medida':<12}{'n':>5}{'descart.':>9}{'sesgo':>9}{'±1.96·DE':>10}{'MAE':>8}{'RMSE':>8}{'r':>7}")
+    print(f"{'medida':<19}{'n':>5}{'descart.':>9}{'sesgo':>9}{'±1.96·DE':>10}{'MAE':>8}{'RMSE':>8}{'r':>7}")
     for medida, e in resultados.items():
-        print(f"{medida:<12}{e['n']:>5}{e['descartadas']:>9}{e['sesgo']:>9.2f}{e['limite']:>10.2f}{e['mae']:>8.2f}{e['rmse']:>8.2f}{e['r']:>7.2f}")
+        print(f"{medida:<19}{e['n']:>5}{e['descartadas']:>9}{e['sesgo']:>9.2f}{e['limite']:>10.2f}{e['mae']:>8.2f}{e['rmse']:>8.2f}{e['r']:>7.2f}")
 
     app = QApplication(sys.argv)
     pg.setConfigOptions(background="w", foreground="k", antialias=True)
     lienzo = pg.GraphicsLayoutWidget()
-    for medida in MEDIDAS:
-        bland_altman(lienzo.addPlot(), pares[medida], resultados[medida], f"Bland-Altman: {medida}")
-    lienzo.resize(1500, 480)
+    for i, medida in enumerate(MEDIDAS):
+        bland_altman(lienzo.addPlot(row=i // 2, col=i % 2), pares[medida], resultados[medida], f"Bland-Altman: {medida}")
+    lienzo.resize(1100, 900)
     lienzo.show()
     app.processEvents()
     Path("validacion").mkdir(exist_ok=True)

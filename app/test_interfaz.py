@@ -5,9 +5,13 @@ import threading
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel
 
-from interfaz import VENTANA, Panel
+from interfaz import (
+    COLORES_ZONA, HRV, LIMITES_FC, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, zona_hrv,
+)
 from lector import FS
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -26,6 +30,15 @@ def alimentar(rojo, ir):
 panel.calcular()
 assert panel.valor_fc.text() == "--"
 
+parcial = Panel(iter(threading.Event().wait, None), "Prueba")
+assert parcial.graf_fc.viewRange()[0] == [0, TENDENCIA], parcial.graf_fc.viewRange()[0]
+for n in range(3 * FS):
+    parcial.cola.put((n, 50000, 60000))
+parcial.refrescar()
+assert parcial.graf_pleth.viewRange()[0] == [0, VENTANA / FS], parcial.graf_pleth.viewRange()[0]
+eje_y = parcial.graf_pleth.getAxis("left")
+assert eje_y.isVisible() and eje_y.labelText == "volumen sanguíneo (u.a.)" and not eje_y.style["showValues"]
+
 pulso = np.sin(2 * np.pi * 72 / 60 * np.arange(VENTANA) / FS)
 panel.grabar()
 alimentar(50000 + 500 * pulso, 60000 + 1200 * pulso)
@@ -33,18 +46,113 @@ panel.grabar()
 assert abs(int(panel.valor_fc.text()) - 72) <= 2, panel.valor_fc.text()
 assert abs(float(panel.valor_sat.text()) - 97.5) <= 1, panel.valor_sat.text()
 assert abs(float(panel.valor_pi.text()) - 4.0) < 0.2, panel.valor_pi.text()
-assert "Midiendo" in panel.estado.text(), panel.estado.text()
+assert "Midiendo" in panel.estado.text() and "calidad" in panel.estado.text(), panel.estado.text()
 
 pleth = panel.curva.getData()[1][-5 * FS:]
 assert np.corrcoef(pleth, -pulso[-5 * FS:])[0, 1] > 0.9
+tiempo = panel.curva.getData()[0]
+assert tiempo[0] == 0 and tiempo[-1] == (VENTANA - 1) / FS, (tiempo[0], tiempo[-1])
+assert panel.curva_fc.getData()[0][-1] == (VENTANA - 1) / FS
 
 with open(next(Path("sesiones").glob("*.csv")), newline="") as archivo:
     filas = list(csv.reader(archivo))
 assert filas[0] == ["n", "rojo", "ir"]
 assert len(filas) == VENTANA + 1
 
+assert any(e.text() == "%" and e.styleSheet() == panel.valor_sat.styleSheet() for e in panel.findChildren(QLabel))
+
+latidos = []
+latir = panel.latir
+panel.latir = lambda: latidos.append(1)
+for n in range(VENTANA, VENTANA + 5 * FS):
+    p = np.sin(2 * np.pi * 72 / 60 * n / FS)
+    panel.cola.put((n, int(50000 + 500 * p), int(60000 + 1200 * p)))
+panel.refrescar()
+assert len(latidos) == 6, len(latidos)
+apagado = panel.corazon.styleSheet()
+latir()
+assert panel.corazon.styleSheet() != apagado
+app.processEvents()
+QTest.qWait(300)
+assert panel.corazon.styleSheet() == apagado
+
 alimentar(np.full(VENTANA, 500), np.full(VENTANA, 600))
 assert panel.valor_fc.text() == "--"
 assert "Sin dedo" in panel.estado.text(), panel.estado.text()
+
+assert panel.zona_fc.getRegion() == LIMITES_FC
+assert panel.zona_sat.getRegion() == (SPO2_MINIMA, 100)
+
+ajustes = Ajustes(panel, LIMITES_FC, SPO2_MINIMA)
+ajustes.fc_min.setValue(500)
+assert ajustes.fc_min.value() == LIMITES_FC[1] - 1
+ajustes.fc_max.setValue(0)
+assert ajustes.fc_max.value() == ajustes.fc_min.value() + 1
+assert not ajustes.alarma.isEnabled()
+
+panel.fijar_limites((60, 100), 92)
+assert panel.zona_fc.getRegion() == (60, 100)
+assert panel.zona_sat.getRegion() == (92, 100)
+
+ruidoso = Panel(iter(threading.Event().wait, None), "Prueba")
+azar = np.random.default_rng(5).normal(0, 300, VENTANA)
+for n in range(VENTANA):
+    ruidoso.cola.put((n, 50000, int(60000 + azar[n])))
+ruidoso.refrescar()
+ruidoso.calcular()
+assert "Señal poco fiable" in ruidoso.estado.text(), ruidoso.estado.text()
+assert ruidoso.valor_fc.text() == ruidoso.valor_sat.text() == ruidoso.valor_pi.text() == "--"
+assert len(ruidoso.ir_hrv) == VENTANA
+
+assert [zona_hrv(v, (19, 75)) for v in (5, 19, 40, 75, 120)] == [0, 1, 1, 2, 2]
+
+
+def pulsos(rr, n):
+    u = np.arange(n)[:, None] / FS - np.cumsum(rr)[None, :]
+    return 60000 - 1200 * (np.exp(-((u - 0.15) / 0.07) ** 2) + 0.5 * np.exp(-((u - 0.45) / 0.09) ** 2)).sum(axis=1)
+
+
+def panel_hrv(rr):
+    p = Panel(iter(threading.Event().wait, None), "Prueba")
+    ir = pulsos(rr, 62 * FS)
+    for segundo in range(62):
+        for n in range(segundo * FS, (segundo + 1) * FS):
+            p.cola.put((n, 50000, int(ir[n])))
+        p.refrescar()
+        p.calcular()
+        if segundo == 29:
+            assert p.bloques["RMSSD"][0].text() == "--"
+            assert "Acumulando señal: 30 / 60 s" in p.bloques["RMSSD"][2].text(), p.bloques["RMSSD"][2].text()
+    return p
+
+
+def encendidas(p, nombre):
+    escala = p.bloques[nombre][1]
+    return [i for i, e in enumerate(escala) if e.styleSheet() == estilo_zona(COLORES_ZONA[i], True)]
+
+
+generador = np.random.default_rng(3)
+for sigma, esperada in ((0, 0), (0.04, 1), (0.1, 2)):
+    p = panel_hrv(0.8 + generador.normal(0, sigma, 80))
+    for nombre in HRV:
+        valor, _, interpretacion = p.bloques[nombre]
+        assert valor.text() != "--", (sigma, nombre)
+        zona = zona_hrv(float(valor.text()), HRV[nombre][1])
+        assert encendidas(p, nombre) == [zona], (sigma, nombre, encendidas(p, nombre))
+        assert interpretacion.text() == HRV[nombre][2][zona]
+    assert encendidas(p, "RMSSD") == [esperada], (sigma, p.bloques["RMSSD"][0].text())
+
+assert p.panel_hrv.isHidden() and p.flecha.arrowType() == Qt.ArrowType.RightArrow
+p.flecha.click()
+assert not p.panel_hrv.isHidden() and p.flecha.arrowType() == Qt.ArrowType.DownArrow
+p.flecha.click()
+assert p.panel_hrv.isHidden() and p.flecha.arrowType() == Qt.ArrowType.RightArrow
+
+for n in range(62 * FS, 72 * FS):
+    p.cola.put((n, 500, 600))
+p.refrescar()
+p.calcular()
+assert "Sin dedo" in p.estado.text() and len(p.ir_hrv) == 0
+assert p.bloques["RMSSD"][0].text() == "--" and encendidas(p, "RMSSD") == []
 
 print("OK")
