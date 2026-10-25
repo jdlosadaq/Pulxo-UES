@@ -35,8 +35,17 @@ assert all(np.abs(latidos - d).min() < 0.02 for d in detectados)
 pares = evaluar(base)
 assert len(pares["FC (lpm)"]) == 12 and len(pares["RMSSD (ms)"]) == 2 and len(pares["SDNN (ms)"]) == 2
 assert all(abs(r - m) < 2 for r, m in pares["FC (lpm)"]), pares["FC (lpm)"]
+assert pares["FC fiable (lpm)"] == pares["FC (lpm)"]
 for medida in ("RMSSD (ms)", "SDNN (ms)"):
     assert all(abs(r - m) < 0.2 * r for r, m in pares[medida]), pares[medida]
+
+ruidoso = Path(tempfile.mkdtemp()) / "ruidoso"
+Path(f"{ruidoso}.hea").write_text(Path(f"{base}.hea").read_text().replace("registro", "ruidoso"))
+azar = np.random.default_rng(2).normal(0, 0.5, t.size)
+np.column_stack([np.round((1 + azar) * 1000 - 500), np.round(ecg * 200 + 100)]).astype("<i2").tofile(f"{ruidoso}.dat")
+pares = evaluar(ruidoso)
+assert len(pares["FC fiable (lpm)"]) == 12 and all(m is None for _, m in pares["FC fiable (lpm)"])
+assert len(pares["FC (lpm)"]) == 12 and all(m is not None for _, m in pares["FC (lpm)"])
 
 e = estadisticas([(1, 2), (2, 3), (3, 4), (4, 5), (5, None)])
 assert e["n"] == 4 and e["descartadas"] == 1
