@@ -1,13 +1,14 @@
 import sys
 
 import numpy as np
-from scipy.signal import butter, correlate, filtfilt, find_peaks
+from scipy.signal import butter, correlate, detrend, filtfilt, find_peaks
 
 from lector import FS
 
 A, B = 110, 25
 BANDA = (0.5, 4)
 CALIDAD_MINIMA = 0.5
+CORTE_APG = 12
 
 
 def cargar(ruta):
@@ -59,6 +60,70 @@ def variabilidad(ir):
     if sucesivos.sum() < 30:
         return None
     return 1000 * np.sqrt(np.mean(np.diff(rr)[sucesivos] ** 2)), 1000 * np.std(rr[valido], ddof=1)
+
+
+def suavizar(x, fs=FS, corte=CORTE_APG):
+    return filtfilt(*butter(3, corte, fs=fs), detrend(x))
+
+
+def segunda_derivada(suave, fs=FS):
+    return np.gradient(np.gradient(suave, 1 / fs), 1 / fs)
+
+
+def ondas(suave, fs=FS):
+    inicio, fin = int(0.2 * fs), suave.size - int(0.6 * fs)
+    if fin <= inicio:
+        return np.empty((0, 5))
+    velocidad = np.gradient(suave, 1 / fs)
+    senal = segunda_derivada(suave, fs)
+    subidas = find_peaks(velocidad, height=0.5 * velocidad[inicio:fin].max(), distance=int(0.35 * fs))[0]
+    subidas = subidas[(subidas >= inicio) & (subidas < fin)]
+    filas = []
+    for k, v in enumerate(subidas):
+        desde = max(v - int(0.12 * fs), 0)
+        ia = desde + np.argmax(senal[desde:v + 1])
+        siguiente = subidas[k + 1] - int(0.12 * fs) if k + 1 < subidas.size else senal.size
+        tramo = senal[ia:min(ia + int(0.5 * fs), siguiente)]
+        altos = find_peaks(tramo, prominence=0.05 * tramo[0])[0]
+        bajos = find_peaks(-tramo, prominence=0.05 * tramo[0])[0]
+        fila, posicion = [ia, np.nan, np.nan, np.nan, np.nan], 0
+        for j, fuente in enumerate((bajos, altos, bajos, altos)):
+            despues = fuente[fuente > posicion]
+            if despues.size == 0:
+                break
+            posicion = despues[0]
+            fila[j + 1] = ia + posicion
+        filas.append(fila)
+    return np.array(filas, dtype=float).reshape(-1, 5)
+
+
+def amplitudes(senal, posiciones):
+    validas = ~np.isnan(posiciones)
+    resultado = np.full(posiciones.shape, np.nan)
+    resultado[validas] = senal[posiciones[validas].astype(int)]
+    return resultado
+
+
+def indices(onda):
+    a, b, c, d, e = onda.T
+    return np.column_stack([b / a, c / a, d / a, e / a, (b - c - d - e) / a])
+
+
+def latido_promedio(senal, inicios, antes, despues):
+    tramos = [senal[int(p) - antes:int(p) + despues] for p in inicios if antes <= p and p + despues <= senal.size]
+    return np.mean(tramos, axis=0) if tramos else None
+
+
+def morfologia(suave, fs=FS):
+    posiciones = ondas(suave, fs)
+    pulso = latido_promedio(suave, posiciones[:, 0], int(0.25 * fs), int(0.75 * fs))
+    if pulso is None:
+        return None
+    marcas = ondas(pulso, fs)[:1]
+    if marcas.size == 0:
+        return None
+    segunda = segunda_derivada(pulso, fs)
+    return pulso, segunda, marcas[0], indices(amplitudes(segunda, marcas))[0], len(posiciones)
 
 
 if __name__ == "__main__":

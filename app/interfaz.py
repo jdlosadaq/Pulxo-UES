@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 import serial
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QStyle, QToolButton, QVBoxLayout, QWidget,
@@ -17,7 +18,9 @@ from PySide6.QtWidgets import (
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from lector import BAUDIO, FS, muestras, simulador
-from procesamiento import CALIDAD_MINIMA, calidad_senal, frecuencia_cardiaca, indice_perfusion, spo2, variabilidad
+from procesamiento import (
+    CALIDAD_MINIMA, calidad_senal, frecuencia_cardiaca, indice_perfusion, morfologia, spo2, suavizar, variabilidad,
+)
 
 VENTANA = 10 * FS
 VENTANA_HRV = 60 * FS
@@ -49,6 +52,30 @@ HRV = {
             "Poca variabilidad total: regulación autonómica limitada, estrés o fatiga.",
             "Variabilidad total habitual en reposo.",
             "Variabilidad total alta: buena adaptabilidad. Descarta que sea ruido o movimiento.",
+        ),
+    ),
+}
+ANTES, DESPUES = 25, 75
+COLORES_ONDA = ("#4aa3ff", "#e5534b", "#d29922", "#c678dd", "#34ff37")
+ONDA = {
+    "b/a": (
+        "Profundidad de la onda b respecto a la onda a. Se hace menos negativa con la edad.",
+        0,
+        (-1.1, -0.45),
+        (("< 40 años", -0.94), ("≥ 40 años", -0.76)),
+        (
+            "Onda b profunda: forma parecida al promedio de las personas menores de 40 años en PPG-BP.",
+            "Onda b menos profunda: forma parecida al promedio de las personas de 40 años o más en PPG-BP.",
+        ),
+    ),
+    "AGI": (
+        "Índice de envejecimiento (b − c − d − e) / a. Combina las cinco ondas y sube con la edad.",
+        4,
+        (-1.45, 0.1),
+        (("< 40 años", -1.12), ("≥ 40 años", -0.63)),
+        (
+            "Valor bajo: forma parecida al promedio de las personas menores de 40 años en PPG-BP.",
+            "Valor alto: forma parecida al promedio de las personas de 40 años o más en PPG-BP.",
         ),
     ),
 }
@@ -139,6 +166,160 @@ def bloque(nombre):
     return caja, valor, escala, interpretacion
 
 
+class Escala(QWidget):
+    def __init__(self, rango, marcas):
+        super().__init__(minimumHeight=72)
+        self.rango, self.marcas, self.valor = rango, marcas, None
+
+    def fijar(self, valor):
+        self.valor = valor
+        self.update()
+
+    def posicion(self, valor, izquierda, ancho):
+        fraccion = (valor - self.rango[0]) / (self.rango[1] - self.rango[0])
+        return izquierda + ancho * min(max(fraccion, 0), 1)
+
+    def paintEvent(self, evento):
+        pintor = QPainter(self)
+        pintor.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fuente = pintor.font()
+        fuente.setPixelSize(12)
+        pintor.setFont(fuente)
+        izquierda, ancho, arriba = 16, self.width() - 32, 26
+        pintor.setPen(QColor("#8a8a8a"))
+        pintor.drawText(QRectF(izquierda, 0, ancho, 16), Qt.AlignmentFlag.AlignLeft, "patrón más elástico")
+        pintor.drawText(QRectF(izquierda, 0, ancho, 16), Qt.AlignmentFlag.AlignRight, "patrón más rígido")
+        degradado = QLinearGradient(izquierda, 0, izquierda + ancho, 0)
+        for punto, color in ((0, "#4aa3ff"), (0.5, "#d29922"), (1, ROJO)):
+            degradado.setColorAt(punto, QColor(color))
+        pintor.setPen(Qt.PenStyle.NoPen)
+        pintor.setBrush(degradado)
+        pintor.drawRoundedRect(QRectF(izquierda, arriba, ancho, 14), 7, 7)
+        pintor.setPen(QColor("#d0d0d0"))
+        for texto, valor in self.marcas:
+            x = self.posicion(valor, izquierda, ancho)
+            pintor.drawLine(QPointF(x, arriba + 14), QPointF(x, arriba + 22))
+            pintor.drawText(QRectF(x - 60, arriba + 24, 120, 18), Qt.AlignmentFlag.AlignCenter, texto)
+        if self.valor is not None:
+            x = self.posicion(self.valor, izquierda, ancho)
+            pintor.setPen(QColor("#1e1f22"))
+            pintor.setBrush(QColor("#ffffff"))
+            pintor.drawPolygon(QPolygonF([QPointF(x - 8, arriba - 8), QPointF(x + 8, arriba - 8), QPointF(x, arriba + 10)]))
+
+
+def tarjeta_onda(nombre):
+    descripcion, _, rango, marcas, _ = ONDA[nombre]
+    caja = QFrame(objectName="tarjeta")
+    valor = QLabel("--", styleSheet="font-size: 48px; font-weight: bold;")
+    escala = Escala(rango, marcas)
+    interpretacion = QLabel(wordWrap=True)
+    cabecera = QHBoxLayout()
+    cabecera.addWidget(QLabel(nombre, styleSheet="font-size: 22px; font-weight: bold;"))
+    cabecera.addStretch()
+    cabecera.addWidget(valor)
+    columna = QVBoxLayout(caja)
+    columna.addLayout(cabecera)
+    columna.addWidget(QLabel(descripcion, wordWrap=True, styleSheet="color: #a0a0a0;"))
+    columna.addWidget(escala)
+    columna.addWidget(interpretacion)
+    return caja, valor, escala, interpretacion
+
+
+class VentanaOnda(QWidget):
+    def __init__(self, padre):
+        super().__init__(padre, Qt.WindowType.Window, windowTitle="Pulxo-UES · Onda de pulso", styleSheet=ESTILO)
+        self.tiempo = (np.arange(ANTES + DESPUES) - ANTES) * 1000 / FS
+        self.estado = QLabel(styleSheet="color: #d29922;")
+        self.graf_pulso = pg.PlotWidget(title="Pulso promedio")
+        self.graf_apg = pg.PlotWidget(title="Segunda derivada del pulso (APG) con sus ondas a, b, c, d y e")
+        for g in (self.graf_pulso, self.graf_apg):
+            g.setLabel("bottom", "tiempo desde la onda a (ms)")
+            g.getAxis("left").setStyle(showValues=False)
+            g.getAxis("left").setTicks([[], []])
+            g.showGrid(x=True, y=False, alpha=0.2)
+            g.getViewBox().setDefaultPadding(0.15)
+        self.graf_apg.setXLink(self.graf_pulso)
+        self.graf_apg.addLine(y=0, pen=pg.mkPen("#555555"))
+        self.curva_pulso = self.graf_pulso.plot(pen=pg.mkPen(AZUL, width=3))
+        self.curva_apg = self.graf_apg.plot(pen=pg.mkPen("#d0d0d0", width=3))
+        self.puntos = pg.ScatterPlotItem(size=16, pen=pg.mkPen("#1e1f22", width=2))
+        self.graf_apg.addItem(self.puntos)
+        self.letras, self.guias = [], []
+        for letra, color in zip("abcde", COLORES_ONDA):
+            texto = pg.TextItem(html=f"<b style='font-size: 18px; color: {color};'>{letra}</b>", anchor=(0.5, 1.2 if letra in "ace" else -0.2))
+            guia = pg.InfiniteLine(angle=90, pen=pg.mkPen(color, width=2, style=Qt.PenStyle.DashLine))
+            self.graf_apg.addItem(texto)
+            self.graf_pulso.addItem(guia)
+            self.letras.append(texto)
+            self.guias.append(guia)
+        self.tarjetas, tarjetas = {}, QVBoxLayout()
+        for nombre in ONDA:
+            caja, valor, escala, interpretacion = tarjeta_onda(nombre)
+            self.tarjetas[nombre] = valor, escala, interpretacion
+            tarjetas.addWidget(caja)
+        tarjetas.addStretch()
+        graficas = QVBoxLayout()
+        graficas.addWidget(self.graf_pulso)
+        graficas.addWidget(self.graf_apg)
+        cuerpo = QHBoxLayout()
+        cuerpo.addLayout(graficas, 3)
+        cuerpo.addLayout(tarjetas, 2)
+        nota = QLabel(
+            "Referencias: promedio de 219 sujetos de la base pública PPG-BP, analizados a 100 Hz con otro sensor. Es una "
+            "tendencia de grupo: no indica tu edad ni mide la rigidez arterial. La forma de la onda también cambia con la "
+            "presión del dedo sobre el sensor, la temperatura de la mano y la presión arterial.",
+            wordWrap=True,
+            styleSheet="color: #8a8a8a; font-size: 12px;",
+        )
+        principal = QVBoxLayout(self)
+        principal.addWidget(QLabel("MORFOLOGÍA DE LA ONDA DE PULSO", styleSheet="font-size: 18px; font-weight: bold;"))
+        principal.addWidget(QLabel("Indicador de morfología de la onda de pulso asociado al envejecimiento vascular", styleSheet="color: #a0a0a0;"))
+        principal.addWidget(self.estado)
+        principal.addLayout(cuerpo, 1)
+        principal.addWidget(nota)
+        self.resize(1200, 760)
+        self.actualizar(None)
+
+    def actualizar(self, ir):
+        if ir is None:
+            self.mostrar(None, "Esperando señal fiable: el panel principal debe estar en «Midiendo».")
+            return
+        resultado = morfologia(suavizar(-ir))
+        if resultado is None:
+            self.mostrar(None, "No se encontraron las ondas a–e en los últimos 10 s.")
+            return
+        self.mostrar(resultado, f"Promedio de {resultado[4]} latidos de los últimos 10 s")
+
+    def mostrar(self, resultado, texto):
+        self.estado.setText(texto)
+        pulso, apg_medio, marcas, valores, _ = resultado or (None, None, np.full(5, np.nan), None, 0)
+        if pulso is None:
+            self.curva_pulso.setData([], [])
+            self.curva_apg.setData([], [])
+        else:
+            self.curva_pulso.setData(self.tiempo, pulso)
+            self.curva_apg.setData(self.tiempo, apg_medio)
+        visibles = [k for k in range(5) if not np.isnan(marcas[k])]
+        self.puntos.setData(
+            x=[self.tiempo[int(marcas[k])] for k in visibles],
+            y=[apg_medio[int(marcas[k])] for k in visibles],
+            brush=[COLORES_ONDA[k] for k in visibles],
+        )
+        for k, (letra, guia) in enumerate(zip(self.letras, self.guias)):
+            letra.setVisible(k in visibles)
+            guia.setVisible(k in visibles)
+            if k in visibles:
+                letra.setPos(self.tiempo[int(marcas[k])], apg_medio[int(marcas[k])])
+                guia.setValue(self.tiempo[int(marcas[k])])
+        for nombre, (_, columna, _, referencias, textos) in ONDA.items():
+            valor, escala, interpretacion = self.tarjetas[nombre]
+            medida = None if valores is None or np.isnan(valores[columna]) else valores[columna]
+            valor.setText("--" if medida is None else f"{medida:.2f}")
+            escala.fijar(medida)
+            corte = sum(v for _, v in referencias) / len(referencias)
+            interpretacion.setText("" if medida is None else textos[zona_hrv(medida, (corte,))])
+
+
 class Ajustes(QDialog):
     def __init__(self, padre, limites_fc, spo2_minima):
         super().__init__(padre, windowTitle="Ajustes")
@@ -182,6 +363,8 @@ class Panel(QWidget):
         icono = self.style().standardIcon
         self.boton = QPushButton(icono(QStyle.StandardPixmap.SP_DialogSaveButton), "Grabar", clicked=self.grabar)
         ajustes = QPushButton("Ajustes", clicked=self.configurar)
+        self.boton_onda = QPushButton("Onda de pulso ↗", clicked=self.abrir_onda)
+        self.ventana_onda = VentanaOnda(self)
         salir = QPushButton("Salir", clicked=self.close)
         barra = QHBoxLayout()
         barra.addWidget(self.hora)
@@ -189,6 +372,7 @@ class Panel(QWidget):
         barra.addStretch()
         barra.addWidget(QLabel("PULXO-UES · PULSIOXÍMETRO MAX30102", styleSheet="font-size: 16px; font-weight: bold;"))
         barra.addStretch()
+        barra.addWidget(self.boton_onda)
         barra.addWidget(ajustes)
         barra.addWidget(self.boton)
         barra.addWidget(salir)
@@ -313,6 +497,8 @@ class Panel(QWidget):
         if estado in ("Sin dedo", "Desconectado"):
             self.ir_hrv.clear()
         self.mostrar_variabilidad()
+        if self.ventana_onda.isVisible():
+            self.ventana_onda.actualizar(ir if self.midiendo else None)
         grabando = f" · <span style='color: {ROJO};'>● GRABANDO</span>" if self.archivo else ""
         detalle = "" if calidad is None else f" (calidad {calidad:.2f})"
         self.estado.setText(f"{self.origen} · {estado}{detalle}{grabando}")
@@ -352,6 +538,12 @@ class Panel(QWidget):
             else:
                 interpretacion.setText(f"Acumulando señal: {len(self.ir_hrv) // FS} / {VENTANA_HRV // FS} s")
 
+    def abrir_onda(self):
+        self.ventana_onda.show()
+        self.ventana_onda.raise_()
+        self.ventana_onda.activateWindow()
+        self.ventana_onda.actualizar(np.array(self.ir) if self.midiendo else None)
+
     def configurar(self):
         ajustes = Ajustes(self, self.zona_fc.getRegion(), self.zona_sat.getRegion()[0])
         if ajustes.exec():
@@ -375,6 +567,7 @@ class Panel(QWidget):
         self.boton.setText("Detener")
 
     def closeEvent(self, evento):
+        self.ventana_onda.close()
         if self.archivo:
             self.archivo.close()
         super().closeEvent(evento)

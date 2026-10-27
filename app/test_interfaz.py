@@ -10,7 +10,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from interfaz import (
-    COLORES_ZONA, HRV, LIMITES_FC, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, zona_hrv,
+    COLORES_ZONA, HRV, LIMITES_FC, ONDA, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Escala, Panel, estilo_zona,
+    zona_hrv,
 )
 from lector import FS
 
@@ -154,5 +155,44 @@ p.refrescar()
 p.calcular()
 assert "Sin dedo" in p.estado.text() and len(p.ir_hrv) == 0
 assert p.bloques["RMSSD"][0].text() == "--" and encendidas(p, "RMSSD") == []
+
+escala = Escala((-1, 0), (("referencia", -0.5),))
+escala.resize(300, 72)
+escala.fijar(-0.25)
+assert escala.valor == -0.25 and escala.posicion(-0.25, 16, 268) == 16 + 268 * 0.75
+assert escala.posicion(-5, 16, 268) == 16 and escala.posicion(5, 16, 268) == 16 + 268
+assert not escala.grab().isNull()
+
+principal = Panel(iter(threading.Event().wait, None), "Prueba")
+onda = principal.ventana_onda
+assert onda.isHidden() and onda.tarjetas["b/a"][0].text() == "--"
+diez = np.arange(VENTANA) / FS
+desfase = diez[:, None] - np.arange(0, 11, 0.85)[None, :]
+subida = np.clip(desfase, 0, None) / 0.05
+forma = (subida ** 2 * np.exp(2 - subida)).sum(axis=1) / 4 + 0.25 * np.exp(-((desfase - 0.38) / 0.07) ** 2).sum(axis=1)
+forma /= forma.max()
+irregular = np.random.default_rng(0).normal(0, 15, VENTANA)
+for n in range(VENTANA):
+    principal.cola.put((n, int(50000 - 600 * forma[n]), int(60000 - 1500 * forma[n] + irregular[n])))
+principal.refrescar()
+principal.calcular()
+assert "Midiendo" in principal.estado.text(), principal.estado.text()
+principal.boton_onda.click()
+assert not onda.isHidden()
+assert "latidos" in onda.estado.text(), onda.estado.text()
+for nombre, (_, _, _, _, textos) in ONDA.items():
+    valor, escala_onda, interpretacion = onda.tarjetas[nombre]
+    assert valor.text() != "--" and escala_onda.valor is not None and interpretacion.text() in textos, nombre
+assert -1.0 < float(onda.tarjetas["b/a"][0].text()) < -0.7, onda.tarjetas["b/a"][0].text()
+assert len(onda.puntos.data) == 5 and all(letra.isVisible() for letra in onda.letras)
+
+for n in range(VENTANA, 2 * VENTANA):
+    principal.cola.put((n, 500, 600))
+principal.refrescar()
+principal.calcular()
+assert "Esperando" in onda.estado.text() and onda.tarjetas["AGI"][0].text() == "--"
+assert len(onda.puntos.data) == 0 and not any(letra.isVisible() for letra in onda.letras)
+principal.close()
+assert onda.isHidden()
 
 print("OK")
