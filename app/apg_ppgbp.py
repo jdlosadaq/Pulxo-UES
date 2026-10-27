@@ -8,8 +8,10 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtWidgets import QApplication
-from scipy.signal import butter, detrend, filtfilt, find_peaks, resample_poly
+from scipy.signal import butter, filtfilt, resample_poly
 from scipy.stats import pearsonr, spearmanr
+
+from procesamiento import morfologia, suavizar
 
 FS_ORIGEN = 1000
 INDICES = ("b/a", "c/a", "d/a", "e/a", "AGI")
@@ -33,57 +35,27 @@ def etiquetas(ruta):
     return sujetos
 
 
-def apg(x, fs, corte):
+def preparar(x, fs, corte):
     x = resample_poly(x, fs, FS_ORIGEN) if fs != FS_ORIGEN else np.asarray(x, dtype=float)
     velocidad = np.gradient(filtfilt(*butter(3, 15, fs=fs), x - x.mean()))
     if velocidad.max() < -velocidad.min():
         x = -x
-    suave = filtfilt(*butter(3, corte, fs=fs), detrend(x))
-    return np.gradient(np.gradient(suave, 1 / fs), 1 / fs)
-
-
-def ondas(senal, fs):
-    inicio, fin = int(0.2 * fs), senal.size - int(0.6 * fs)
-    if fin <= inicio:
-        return np.empty((0, 5))
-    candidatos = find_peaks(senal, height=0.5 * senal[inicio:fin].max())[0]
-    candidatos = candidatos[(candidatos >= inicio) & (candidatos < fin)]
-    filas = []
-    for k, ia in enumerate(candidatos):
-        siguiente = candidatos[k + 1] if k + 1 < candidatos.size else senal.size
-        tramo = senal[ia:min(ia + int(0.5 * fs), siguiente)]
-        a = senal[ia]
-        altos = find_peaks(tramo, prominence=0.05 * a)[0]
-        bajos = find_peaks(-tramo, prominence=0.05 * a)[0]
-        fila, posicion = [a, np.nan, np.nan, np.nan, np.nan], 0
-        for j, fuente in enumerate((bajos, altos, bajos, altos)):
-            despues = fuente[fuente > posicion]
-            if despues.size == 0:
-                break
-            posicion = despues[0]
-            fila[j + 1] = tramo[posicion]
-        filas.append(fila)
-    return np.array(filas).reshape(-1, 5)
-
-
-def indices(onda):
-    a, b, c, d, e = onda.T
-    return np.column_stack([b / a, c / a, d / a, e / a, (b - c - d - e) / a])
+    return suavizar(x, fs, corte)
 
 
 def sujetos_indices(carpeta, fs, corte, edades):
     por_sujeto = {}
     for ruta in sorted((carpeta / "0_subject").glob("*.txt")):
-        latidos = indices(ondas(apg(np.loadtxt(ruta), fs, corte), fs))
-        por_sujeto.setdefault(int(ruta.stem.split("_")[0]), []).append(latidos)
+        resultado = morfologia(preparar(np.loadtxt(ruta), fs, corte), fs)
+        por_sujeto.setdefault(int(ruta.stem.split("_")[0]), []).append(np.full(5, np.nan) if resultado is None else resultado[3])
     filas, completos, total = [], 0, 0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         for sujeto, registros in por_sujeto.items():
-            latidos = np.vstack(registros)
-            completos += (~np.isnan(latidos[:, 4])).sum()
-            total += len(latidos)
-            filas.append((sujeto, *edades[sujeto], *np.nanmean(latidos, axis=0), (~np.isnan(latidos[:, 4])).mean() if len(latidos) else np.nan))
+            registros = np.vstack(registros)
+            completos += (~np.isnan(registros[:, 4])).sum()
+            total += len(registros)
+            filas.append((sujeto, *edades[sujeto], *np.nanmedian(registros, axis=0), (~np.isnan(registros[:, 4])).mean()))
     return np.array(filas), completos, total
 
 
@@ -123,7 +95,7 @@ if __name__ == "__main__":
     for columna, (fs, corte) in enumerate(CONFIGURACIONES):
         datos, completos, total = sujetos_indices(carpeta, fs, corte, edades)
         edad, presion = datos[:, 1], datos[:, 2]
-        print(f"\n{fs} Hz, pasa-bajos {corte} Hz: {len(datos)} sujetos, {total} latidos, {100 * completos / total:.0f} % con a-e completos")
+        print(f"\n{fs} Hz, pasa-bajos {corte} Hz: {len(datos)} sujetos, {total} registros, {100 * completos / total:.0f} % con a-e completos en el latido promedio")
         print("  detección completa por edad: " + ", ".join(
             f"{lo}-{hi if hi < 200 else '+'} años {100 * np.nanmean(datos[(edad >= lo) & (edad < hi), 8]):.0f} %" for lo, hi in GRUPOS))
         print(f"  {'índice':<7}{'n':>5}{'r(edad)':>9}{'IC 95 %':>16}{'rho':>7}{'r(edad|PAS)':>13}{'r(PAS)':>8}")
