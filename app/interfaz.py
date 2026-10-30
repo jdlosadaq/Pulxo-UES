@@ -26,6 +26,9 @@ VENTANA_HRV = 60 * FS
 TENDENCIA = 60
 DEDO_MINIMO = 50000
 ESTABILIZACION = 2 * FS
+ESCALA_MINIMA = 100
+MARGEN_ESCALA = 1.5
+HISTERESIS_ESCALA = 0.7
 LIMITES_FC = (50, 120)
 SPO2_MINIMA = 90
 SOS = np.vstack([butter(1, 0.5, btype="high", fs=FS, output="sos"), butter(2, 8, fs=FS, output="sos")])
@@ -390,6 +393,8 @@ class Panel(QWidget):
         self.graf_pleth.getAxis("left").setStyle(showValues=False)
         self.graf_pleth.getAxis("left").setTicks([[], []])
         self.graf_pleth.showGrid(x=True, y=False)
+        self.escala = ESCALA_MINIMA
+        self.graf_pleth.setYRange(-ESCALA_MINIMA, ESCALA_MINIMA, padding=0)
         caja_fc, self.valor_fc, self.corazon = tarjeta("Frecuencia cardiaca (lpm)", AZUL, "♥")
         self.corazon.setStyleSheet(estilo_numero(APAGADO))
         caja_sat, self.valor_sat, _ = tarjeta("SpO₂ · sin calibrar", VERDE, "%")
@@ -467,6 +472,7 @@ class Panel(QWidget):
         self.ir.extend(datos[:, 2])
         self.ir_hrv.extend(datos[:, 2])
         self.vista.extend(self.filtrar(datos[:, 2]))
+        self.ajustar_escala()
         self.tiempo.extend(datos[:, 0] / FS)
         self.curva.setData(np.array(self.tiempo), np.array(self.vista))
         avanzar(self.graf_pleth, self.inicio, self.tiempo[-1], VENTANA / FS)
@@ -486,6 +492,12 @@ class Panel(QWidget):
             if self.con_dedo > ESTABILIZACION:
                 salida[k] = -filtrado[0]
         return salida
+
+    def ajustar_escala(self):
+        objetivo = max(ESCALA_MINIMA, MARGEN_ESCALA * np.percentile(np.abs(self.vista), 98))
+        if objetivo > self.escala or objetivo < HISTERESIS_ESCALA * self.escala:
+            self.escala = objetivo
+            self.graf_pleth.setYRange(-objetivo, objetivo, padding=0)
 
     def detectar_latidos(self, nuevas):
         vista, tiempo = np.array(self.vista), np.array(self.tiempo)
