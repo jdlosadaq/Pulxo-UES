@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from interfaz import (
-    COLORES_ZONA, HRV, LIMITES_FC, ONDA, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Escala, Panel, estilo_zona,
+    COLORES_ZONA, ESTABILIZACION, HRV, LIMITES_FC, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, texto_cambio,
     zona_hrv,
 )
 from lector import FS
@@ -39,6 +39,21 @@ parcial.refrescar()
 assert parcial.graf_pleth.viewRange()[0] == [0, VENTANA / FS], parcial.graf_pleth.viewRange()[0]
 eje_y = parcial.graf_pleth.getAxis("left")
 assert eje_y.isVisible() and eje_y.labelText == "volumen sanguíneo (u.a.)" and not eje_y.style["showValues"]
+
+vacio = Panel(iter(threading.Event().wait, None), "Prueba")
+ruido_ambiente = np.random.default_rng(1).normal(2000, 40, 3 * FS)
+for n in range(3 * FS):
+    vacio.cola.put((n, 1500, int(ruido_ambiente[n])))
+vacio.refrescar()
+assert len(vacio.curva.getData()[1]) == 3 * FS and not np.any(vacio.curva.getData()[1])
+
+pulso_dedo = np.sin(2 * np.pi * 72 / 60 * np.arange(6 * FS) / FS)
+for n in range(6 * FS):
+    vacio.cola.put((3 * FS + n, 50000, int(60000 + 1200 * pulso_dedo[n])))
+vacio.refrescar()
+curva_dedo = vacio.curva.getData()[1][3 * FS:]
+assert not np.any(curva_dedo[:ESTABILIZACION]) and np.abs(curva_dedo).max() < 3000, np.abs(curva_dedo).max()
+assert np.corrcoef(curva_dedo[-2 * FS:], -pulso_dedo[-2 * FS:])[0, 1] > 0.9
 
 pulso = np.sin(2 * np.pi * 72 / 60 * np.arange(VENTANA) / FS)
 panel.grabar()
@@ -156,41 +171,54 @@ p.calcular()
 assert "Sin dedo" in p.estado.text() and len(p.ir_hrv) == 0
 assert p.bloques["RMSSD"][0].text() == "--" and encendidas(p, "RMSSD") == []
 
-escala = Escala((-1, 0), (("referencia", -0.5),))
-escala.resize(300, 72)
-escala.fijar(-0.25)
-assert escala.valor == -0.25 and escala.posicion(-0.25, 16, 268) == 16 + 268 * 0.75
-assert escala.posicion(-5, 16, 268) == 16 and escala.posicion(5, 16, 268) == 16 + 268
-assert not escala.grab().isNull()
+assert texto_cambio(99.7, 100, True) == "Cambio: +0 %" and texto_cambio(70, 100, True) == "Cambio: -30 %"
+assert texto_cambio(-2.101, -2.1, False) == "Cambio: +0.00" and texto_cambio(-2.0, -2.1, False) == "Cambio: +0.10"
+assert texto_cambio(None, 1, True) == texto_cambio(1, None, False) == "Cambio: --"
 
 principal = Panel(iter(threading.Event().wait, None), "Prueba")
 onda = principal.ventana_onda
-assert onda.isHidden() and onda.tarjetas["b/a"][0].text() == "--"
+assert onda.isHidden() and not onda.boton_base.isEnabled() and onda.tarjetas["b/a"][0].text() == "--"
 diez = np.arange(VENTANA) / FS
 desfase = diez[:, None] - np.arange(0, 11, 0.85)[None, :]
 subida = np.clip(desfase, 0, None) / 0.05
 forma = (subida ** 2 * np.exp(2 - subida)).sum(axis=1) / 4 + 0.25 * np.exp(-((desfase - 0.38) / 0.07) ** 2).sum(axis=1)
 forma /= forma.max()
 irregular = np.random.default_rng(0).normal(0, 15, VENTANA)
-for n in range(VENTANA):
-    principal.cola.put((n, int(50000 - 600 * forma[n]), int(60000 - 1500 * forma[n] + irregular[n])))
-principal.refrescar()
-principal.calcular()
+
+
+def alimentar_forma(inicio, escala):
+    for k in range(VENTANA):
+        principal.cola.put((inicio + k, int(50000 - 600 * escala * forma[k]), int(60000 - 1500 * escala * forma[k] + irregular[k])))
+    principal.refrescar()
+    principal.calcular()
+
+
+alimentar_forma(0, 1)
 assert "Midiendo" in principal.estado.text(), principal.estado.text()
 principal.boton_onda.click()
-assert not onda.isHidden()
+assert not onda.isHidden() and onda.boton_base.isEnabled()
 assert "latidos" in onda.estado.text(), onda.estado.text()
-for nombre, (_, _, _, _, textos) in ONDA.items():
-    valor, escala_onda, interpretacion = onda.tarjetas[nombre]
-    assert valor.text() != "--" and escala_onda.valor is not None and interpretacion.text() in textos, nombre
+for nombre, (ahora, base, cambio) in onda.tarjetas.items():
+    assert ahora.text() != "--" and base.text() == "Base: --" and cambio.text() == "Cambio: --", nombre
 assert -1.0 < float(onda.tarjetas["b/a"][0].text()) < -0.7, onda.tarjetas["b/a"][0].text()
 assert len(onda.puntos.data) == 5 and all(letra.isVisible() for letra in onda.letras)
+assert len(onda.curvas_tendencia["PI"].getData()[0] or []) == 0
 
-for n in range(VENTANA, 2 * VENTANA):
+onda.boton_base.click()
+assert onda.base is not None and onda.curva_pulso_base.getData()[0] is not None
+assert onda.tarjetas["PI"][2].text() == "Cambio: +0 %" and onda.tarjetas["b/a"][2].text() == "Cambio: +0.00"
+
+alimentar_forma(VENTANA, 0.6)
+caida = float(onda.tarjetas["PI"][2].text().split()[1])
+assert -45 < caida < -35, onda.tarjetas["PI"][2].text()
+assert len(onda.curvas_tendencia["PI"].getData()[0]) >= 2
+
+for n in range(2 * VENTANA, 3 * VENTANA):
     principal.cola.put((n, 500, 600))
 principal.refrescar()
 principal.calcular()
 assert "Esperando" in onda.estado.text() and onda.tarjetas["AGI"][0].text() == "--"
+assert onda.base is not None and onda.tarjetas["AGI"][1].text() != "Base: --"
 assert len(onda.puntos.data) == 0 and not any(letra.isVisible() for letra in onda.letras)
 principal.close()
 assert onda.isHidden()
