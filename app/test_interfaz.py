@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from interfaz import (
-    COLORES_ZONA, ESTABILIZACION, HRV, LIMITES_FC, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, texto_cambio,
+    COLORES_ZONA, ESCALA_MINIMA, ESTABILIZACION, HRV, LIMITES_FC, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, texto_cambio,
     zona_hrv,
 )
 from lector import FS
@@ -54,6 +54,31 @@ vacio.refrescar()
 curva_dedo = vacio.curva.getData()[1][3 * FS:]
 assert not np.any(curva_dedo[:ESTABILIZACION]) and np.abs(curva_dedo).max() < 3000, np.abs(curva_dedo).max()
 assert np.corrcoef(curva_dedo[-2 * FS:], -pulso_dedo[-2 * FS:])[0, 1] > 0.9
+inferior, superior = vacio.graf_pleth.viewRange()[1]
+assert inferior == -superior and np.abs(curva_dedo).max() < superior < 2.5 * np.abs(curva_dedo).max(), (inferior, superior)
+
+fondo = Panel(iter(threading.Event().wait, None), "Prueba")
+assert fondo.graf_pleth.viewRange()[1] == [-ESCALA_MINIMA, ESCALA_MINIMA]
+for n in range(3 * FS):
+    fondo.cola.put((n, 1500, 2000))
+fondo.refrescar()
+assert fondo.graf_pleth.viewRange()[1] == [-ESCALA_MINIMA, ESCALA_MINIMA]
+
+
+def pulso_fondo(inicio, amplitud, segundos, pico=0):
+    for k in range(segundos * FS):
+        valor = 60000 + amplitud * np.sin(2 * np.pi * 1.2 * (inicio + k) / FS) + (pico if k == 5 * FS else 0)
+        fondo.cola.put((inicio + k, 50000, int(valor)))
+    fondo.refrescar()
+    return fondo.graf_pleth.viewRange()[1][1]
+
+
+normal = pulso_fondo(3 * FS, 1000, 10)
+assert 1000 < normal < 2500, normal
+assert pulso_fondo(13 * FS, 1000, 10, pico=30000) < 1.3 * normal
+assert pulso_fondo(23 * FS, 2000, 10) > 1.8 * normal
+debil = pulso_fondo(33 * FS, 200, 12)
+assert ESCALA_MINIMA <= debil < normal / 2, debil
 
 pulso = np.sin(2 * np.pi * 72 / 60 * np.arange(VENTANA) / FS)
 panel.grabar()
