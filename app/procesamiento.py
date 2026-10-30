@@ -41,7 +41,7 @@ def calidad_senal(ir):
 
 def spo2(rojo, ir):
     r = (np.std(pasabanda(rojo)) / np.mean(rojo)) / (np.std(pasabanda(ir)) / np.mean(ir))
-    return A - B * r
+    return min(A - B * r, 100)
 
 
 def indice_perfusion(ir):

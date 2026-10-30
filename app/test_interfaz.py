@@ -10,7 +10,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from interfaz import (
-    COLORES_ZONA, ESCALA_MINIMA, ESTABILIZACION, HRV, LIMITES_FC, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, texto_cambio,
+    COLORES_ZONA, ESCALA_MINIMA, ESTABILIZACION, HRV, LIMITES_FC, SEGMENTO_APAGADO, SEGMENTOS_PI, SPO2_MINIMA, TENDENCIA, VENTANA, VENTANA_HRV, Ajustes, Panel, estilo_zona, estilo_segmento, segmentos_pi, texto_cambio,
     zona_hrv,
 )
 from lector import FS
@@ -39,6 +39,14 @@ parcial.refrescar()
 assert parcial.graf_pleth.viewRange()[0] == [0, VENTANA / FS], parcial.graf_pleth.viewRange()[0]
 eje_y = parcial.graf_pleth.getAxis("left")
 assert eje_y.isVisible() and eje_y.labelText == "volumen sanguíneo (u.a.)" and not eje_y.style["showValues"]
+
+reabierta = Panel(iter(threading.Event().wait, None), "Prueba")
+ARRANQUE = 148500
+for n in range(ARRANQUE, ARRANQUE + 3 * FS):
+    reabierta.cola.put((n, 50000, 60000))
+reabierta.refrescar()
+assert reabierta.curva.getData()[0][0] == 0 and reabierta.curva.getData()[0][-1] == 3 - 1 / FS
+assert reabierta.graf_pleth.viewRange()[0] == [0, VENTANA / FS], reabierta.graf_pleth.viewRange()[0]
 
 vacio = Panel(iter(threading.Event().wait, None), "Prueba")
 ruido_ambiente = np.random.default_rng(1).normal(2000, 40, 3 * FS)
@@ -87,7 +95,15 @@ panel.grabar()
 assert abs(int(panel.valor_fc.text()) - 72) <= 2, panel.valor_fc.text()
 assert abs(float(panel.valor_sat.text()) - 97.5) <= 1, panel.valor_sat.text()
 assert abs(float(panel.valor_pi.text()) - 4.0) < 0.2, panel.valor_pi.text()
-assert "Midiendo" in panel.estado.text() and "calidad" in panel.estado.text(), panel.estado.text()
+
+
+def encendidos(p):
+    return [s.styleSheet() for s in p.barra_pi if s.styleSheet() != estilo_segmento(SEGMENTO_APAGADO)]
+
+
+assert len(panel.barra_pi) == SEGMENTOS_PI and 7 <= len(encendidos(panel)) <= 9
+assert set(encendidos(panel)) == {estilo_segmento(COLORES_ZONA[1])}
+assert "Midiendo" in panel.estado.text() and "alidad" not in panel.estado.text(), panel.estado.text()
 
 pleth = panel.curva.getData()[1][-5 * FS:]
 assert np.corrcoef(pleth, -pulso[-5 * FS:])[0, 1] > 0.9
@@ -120,6 +136,7 @@ assert panel.corazon.styleSheet() == apagado
 alimentar(np.full(VENTANA, 500), np.full(VENTANA, 600))
 assert panel.valor_fc.text() == "--"
 assert "Sin dedo" in panel.estado.text(), panel.estado.text()
+assert encendidos(panel) == []
 
 assert panel.zona_fc.getRegion() == LIMITES_FC
 assert panel.zona_sat.getRegion() == (SPO2_MINIMA, 100)
@@ -141,9 +158,33 @@ for n in range(VENTANA):
     ruidoso.cola.put((n, 50000, int(60000 + azar[n])))
 ruidoso.refrescar()
 ruidoso.calcular()
-assert "Señal poco fiable" in ruidoso.estado.text(), ruidoso.estado.text()
+assert "Midiendo" in ruidoso.estado.text() and "poco fiable" not in ruidoso.estado.text(), ruidoso.estado.text()
+assert not ruidoso.midiendo and not ruidoso.ventana_onda.isVisible()
 assert ruidoso.valor_fc.text() == ruidoso.valor_sat.text() == ruidoso.valor_pi.text() == "--"
 assert len(ruidoso.ir_hrv) == VENTANA
+
+assert [segmentos_pi(p) for p in (0.1, 0.5, 0.6, 4, 4.01, 5, 20)] == [1, 1, 2, 8, 9, 10, 10]
+
+debil = Panel(iter(threading.Event().wait, None), "Prueba")
+onda_debil = np.sin(2 * np.pi * 72 / 60 * np.arange(VENTANA) / FS)
+for n in range(VENTANA):
+    debil.cola.put((n, 50000, int(60000 + 250 * onda_debil[n])))
+debil.refrescar()
+debil.calcular()
+assert "Midiendo" in debil.estado.text() and float(debil.valor_pi.text()) < 1
+assert set(encendidos(debil)) == {estilo_segmento(COLORES_ZONA[0])} and len(encendidos(debil)) <= 2
+debil.show()
+app.processEvents()
+
+
+def esquina(w):
+    return w.mapTo(debil, w.rect().topLeft())
+
+
+abajo, arriba = debil.barra_pi[0], debil.barra_pi[-1]
+assert esquina(abajo).y() > esquina(arriba).y() and esquina(abajo).x() == esquina(arriba).x()
+assert esquina(abajo).x() > esquina(debil.valor_pi).x() + debil.valor_pi.width()
+assert (abajo.width(), abajo.height()) == (30, 14)
 
 assert [zona_hrv(v, (19, 75)) for v in (5, 19, 40, 75, 120)] == [0, 1, 1, 2, 2]
 
@@ -155,6 +196,8 @@ def pulsos(rr, n):
 
 def panel_hrv(rr):
     p = Panel(iter(threading.Event().wait, None), "Prueba")
+    assert not hasattr(p, "flecha") and not hasattr(p, "bloques")
+    p.ventana_onda.show()
     ir = pulsos(rr, 62 * FS)
     for segundo in range(62):
         for n in range(segundo * FS, (segundo + 1) * FS):
@@ -162,13 +205,13 @@ def panel_hrv(rr):
         p.refrescar()
         p.calcular()
         if segundo == 29:
-            assert p.bloques["RMSSD"][0].text() == "--"
-            assert "Acumulando señal: 30 / 60 s" in p.bloques["RMSSD"][2].text(), p.bloques["RMSSD"][2].text()
+            assert p.ventana_onda.bloques["RMSSD"][0].text() == "--"
+            assert "Acumulando señal: 30 / 60 s" in p.ventana_onda.bloques["RMSSD"][2].text(), p.ventana_onda.bloques["RMSSD"][2].text()
     return p
 
 
 def encendidas(p, nombre):
-    escala = p.bloques[nombre][1]
+    escala = p.ventana_onda.bloques[nombre][1]
     return [i for i, e in enumerate(escala) if e.styleSheet() == estilo_zona(COLORES_ZONA[i], True)]
 
 
@@ -176,25 +219,25 @@ generador = np.random.default_rng(3)
 for sigma, esperada in ((0, 0), (0.04, 1), (0.1, 2)):
     p = panel_hrv(0.8 + generador.normal(0, sigma, 80))
     for nombre in HRV:
-        valor, _, interpretacion = p.bloques[nombre]
+        valor, _, interpretacion = p.ventana_onda.bloques[nombre]
         assert valor.text() != "--", (sigma, nombre)
         zona = zona_hrv(float(valor.text()), HRV[nombre][1])
         assert encendidas(p, nombre) == [zona], (sigma, nombre, encendidas(p, nombre))
         assert interpretacion.text() == HRV[nombre][2][zona]
-    assert encendidas(p, "RMSSD") == [esperada], (sigma, p.bloques["RMSSD"][0].text())
+    assert encendidas(p, "RMSSD") == [esperada], (sigma, p.ventana_onda.bloques["RMSSD"][0].text())
 
-assert p.panel_hrv.isHidden() and p.flecha.arrowType() == Qt.ArrowType.RightArrow
-p.flecha.click()
-assert not p.panel_hrv.isHidden() and p.flecha.arrowType() == Qt.ArrowType.DownArrow
-p.flecha.click()
-assert p.panel_hrv.isHidden() and p.flecha.arrowType() == Qt.ArrowType.RightArrow
+assert p.ventana_onda.panel_hrv.isHidden() and p.ventana_onda.flecha.arrowType() == Qt.ArrowType.RightArrow
+p.ventana_onda.flecha.click()
+assert not p.ventana_onda.panel_hrv.isHidden() and p.ventana_onda.flecha.arrowType() == Qt.ArrowType.DownArrow
+p.ventana_onda.flecha.click()
+assert p.ventana_onda.panel_hrv.isHidden() and p.ventana_onda.flecha.arrowType() == Qt.ArrowType.RightArrow
 
 for n in range(62 * FS, 72 * FS):
     p.cola.put((n, 500, 600))
 p.refrescar()
 p.calcular()
 assert "Sin dedo" in p.estado.text() and len(p.ir_hrv) == 0
-assert p.bloques["RMSSD"][0].text() == "--" and encendidas(p, "RMSSD") == []
+assert p.ventana_onda.bloques["RMSSD"][0].text() == "--" and encendidas(p, "RMSSD") == []
 
 assert texto_cambio(99.7, 100, True) == "Cambio: +0 %" and texto_cambio(70, 100, True) == "Cambio: -30 %"
 assert texto_cambio(-2.101, -2.1, False) == "Cambio: +0.00" and texto_cambio(-2.0, -2.1, False) == "Cambio: +0.10"
@@ -222,6 +265,10 @@ alimentar_forma(0, 1)
 assert "Midiendo" in principal.estado.text(), principal.estado.text()
 principal.boton_onda.click()
 assert not onda.isHidden() and onda.boton_base.isEnabled()
+disponible = principal.screen().availableGeometry()
+assert onda.parent() is None
+assert onda.frameGeometry().height() <= disponible.height(), (onda.frameGeometry(), disponible)
+assert disponible.contains(onda.frameGeometry().topLeft())
 assert "latidos" in onda.estado.text(), onda.estado.text()
 for nombre, (ahora, base, cambio) in onda.tarjetas.items():
     assert ahora.text() != "--" and base.text() == "Base: --" and cambio.text() == "Cambio: --", nombre
@@ -247,5 +294,16 @@ assert onda.base is not None and onda.tarjetas["AGI"][1].text() != "Base: --"
 assert len(onda.puntos.data) == 0 and not any(letra.isVisible() for letra in onda.letras)
 principal.close()
 assert onda.isHidden()
+
+cerrada = Panel(iter(threading.Event().wait, None), "Prueba")
+ir_cerrada = pulsos(0.8 + np.random.default_rng(2).normal(0, 0.04, 80), 62 * FS)
+for n in range(62 * FS):
+    cerrada.cola.put((n, 50000, int(ir_cerrada[n])))
+cerrada.refrescar()
+cerrada.calcular()
+assert cerrada.ventana_onda.bloques["RMSSD"][0].text() == "--"
+cerrada.boton_onda.click()
+assert cerrada.ventana_onda.bloques["RMSSD"][0].text() != "--"
+cerrada.close()
 
 print("OK")
