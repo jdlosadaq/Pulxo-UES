@@ -1,4 +1,5 @@
 import csv
+import math
 import queue
 import sys
 import threading
@@ -9,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 import serial
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QSpinBox, QStyle, QToolButton, QVBoxLayout, QWidget,
@@ -27,6 +28,10 @@ TENDENCIA = 60
 DEDO_MINIMO = 50000
 ESTABILIZACION = 2 * FS
 ESCALA_MINIMA = 100
+SEGMENTOS_PI = 10
+PI_POR_SEGMENTO = 0.5
+SEGMENTOS_BAJOS = 2
+SEGMENTO_APAGADO = "#dcdfe4"
 MARGEN_ESCALA = 1.5
 HISTERESIS_ESCALA = 0.7
 LIMITES_FC = (50, 120)
@@ -104,11 +109,19 @@ def zona(grafica, limites):
     return region
 
 
+def segmentos_pi(pi):
+    return min(SEGMENTOS_PI, math.ceil(pi / PI_POR_SEGMENTO))
+
+
+def estilo_segmento(color):
+    return f"background: {color}; border: none; border-radius: 2px;"
+
+
 def estilo_numero(color):
     return f"font-size: 96px; font-weight: bold; color: {color};"
 
 
-def tarjeta(titulo, color, sufijo=""):
+def tarjeta(titulo, color, sufijo="", lateral=None):
     caja = QFrame(objectName="tarjeta")
     valor = QLabel("--", styleSheet=estilo_numero(color))
     unidad = QLabel(sufijo, styleSheet=estilo_numero(color))
@@ -118,9 +131,13 @@ def tarjeta(titulo, color, sufijo=""):
     fila.addWidget(valor)
     fila.addWidget(unidad)
     fila.addStretch()
-    columna = QVBoxLayout(caja)
+    columna = QVBoxLayout()
     columna.addWidget(QLabel(titulo, alignment=Qt.AlignmentFlag.AlignCenter))
     columna.addLayout(fila)
+    externo = QHBoxLayout(caja)
+    externo.addLayout(columna, 1)
+    if lateral:
+        externo.addLayout(lateral)
     return caja, valor, unidad
 
 
@@ -188,8 +205,8 @@ def texto_cambio(valor, base, relativo):
 
 
 class VentanaOnda(QWidget):
-    def __init__(self, padre):
-        super().__init__(padre, Qt.WindowType.Window, windowTitle="Pulxo-UES · Onda de pulso", styleSheet=ESTILO)
+    def __init__(self):
+        super().__init__(windowTitle="Pulxo-UES · Onda de pulso", styleSheet=ESTILO)
         self.tiempo = (np.arange(ANTES + DESPUES) - ANTES) * 1000 / FS
         self.historia = deque(maxlen=HISTORIA)
         self.base = self.ultimo = None
@@ -258,6 +275,29 @@ class VentanaOnda(QWidget):
             wordWrap=True,
             styleSheet="color: #6b7078; font-size: 12px;",
         )
+        self.flecha = QToolButton(
+            text="Variabilidad del pulso",
+            checkable=True,
+            arrowType=Qt.ArrowType.RightArrow,
+            toolButtonStyle=Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
+            toggled=self.alternar_variabilidad,
+        )
+        self.bloques, bloques = {}, QHBoxLayout()
+        for nombre in HRV:
+            caja, valor, escala, interpretacion = bloque(nombre)
+            self.bloques[nombre] = valor, escala, interpretacion
+            bloques.addWidget(caja)
+        nota_hrv = QLabel(
+            "Se estima con el pulso (PPG), no con ECG, y necesita 60 s de señal quieta. Rangos de referencia de "
+            "adultos sanos en reposo (Nunan et al., 2010): varían con la edad y la persona.",
+            wordWrap=True,
+            styleSheet="color: #6b7078; font-size: 12px;",
+        )
+        self.panel_hrv = QWidget(visible=False)
+        contenido = QVBoxLayout(self.panel_hrv)
+        contenido.setContentsMargins(0, 0, 0, 0)
+        contenido.addLayout(bloques)
+        contenido.addWidget(nota_hrv)
         principal = QVBoxLayout(self)
         principal.addWidget(QLabel("¿CÓMO CAMBIA TU ONDA DE PULSO?", styleSheet="font-size: 18px; font-weight: bold;"))
         principal.addWidget(QLabel(
@@ -267,9 +307,37 @@ class VentanaOnda(QWidget):
         ))
         principal.addWidget(self.estado)
         principal.addLayout(cuerpo, 1)
+        principal.addWidget(self.flecha, alignment=Qt.AlignmentFlag.AlignLeft)
+        principal.addWidget(self.panel_hrv)
         principal.addWidget(nota)
         self.resize(1400, 860)
         self.actualizar(None)
+        self.mostrar_variabilidad(())
+
+    def encajar(self, disponible):
+        marco = self.frameGeometry().size() - self.geometry().size()
+        self.resize(min(self.width(), disponible.width() - marco.width()), min(self.height(), disponible.height() - marco.height()))
+        self.move(disponible.topLeft())
+
+    def alternar_variabilidad(self, abierto):
+        self.flecha.setArrowType(Qt.ArrowType.DownArrow if abierto else Qt.ArrowType.RightArrow)
+        self.panel_hrv.setVisible(abierto)
+
+    def mostrar_variabilidad(self, ir_hrv):
+        completa = len(ir_hrv) == VENTANA_HRV
+        medidas = variabilidad(np.array(ir_hrv)) if completa else None
+        for nombre, medida in zip(HRV, medidas or (None, None)):
+            valor, escala, interpretacion = self.bloques[nombre]
+            activa = None if medida is None else zona_hrv(medida, HRV[nombre][1])
+            valor.setText("--" if medida is None else f"{medida:.0f}")
+            for i, etiqueta in enumerate(escala):
+                etiqueta.setStyleSheet(estilo_zona(COLORES_ZONA[i], i == activa))
+            if medida is not None:
+                interpretacion.setText(HRV[nombre][2][activa])
+            elif completa:
+                interpretacion.setText("Señal insuficiente: hay movimiento o ruido.")
+            else:
+                interpretacion.setText(f"Acumulando señal: {len(ir_hrv) // FS} / {VENTANA_HRV // FS} s")
 
     def actualizar(self, ir, instante=0):
         if ir is None:
@@ -376,7 +444,7 @@ class Panel(QWidget):
         self.boton = QPushButton(icono(QStyle.StandardPixmap.SP_DialogSaveButton), "Grabar", clicked=self.grabar)
         ajustes = QPushButton("Ajustes", clicked=self.configurar)
         self.boton_onda = QPushButton("Onda de pulso ↗", clicked=self.abrir_onda)
-        self.ventana_onda = VentanaOnda(self)
+        self.ventana_onda = VentanaOnda()
         salir = QPushButton("Salir", clicked=self.close)
         barra = QHBoxLayout()
         barra.addWidget(self.hora)
@@ -392,13 +460,25 @@ class Panel(QWidget):
         self.graf_pleth, self.curva = grafica("Pletismograma (infrarrojo)", "volumen sanguíneo (u.a.)", AZUL, VENTANA / FS)
         self.graf_pleth.getAxis("left").setStyle(showValues=False)
         self.graf_pleth.getAxis("left").setTicks([[], []])
-        self.graf_pleth.showGrid(x=True, y=False)
+        self.graf_pleth.showGrid(x=False, y=False)
+        self.graf_pleth.setBackground("#ffffff")
         self.escala = ESCALA_MINIMA
         self.graf_pleth.setYRange(-ESCALA_MINIMA, ESCALA_MINIMA, padding=0)
         caja_fc, self.valor_fc, self.corazon = tarjeta("Frecuencia cardiaca (lpm)", AZUL, "♥")
         self.corazon.setStyleSheet(estilo_numero(APAGADO))
         caja_sat, self.valor_sat, _ = tarjeta("SpO₂ · sin calibrar", VERDE, "%")
-        caja_pi, self.valor_pi, _ = tarjeta("Índice de perfusión (%)", "#24272b")
+        self.barra_pi, lateral = [QFrame(fixedSize=QSize(30, 14)) for _ in range(SEGMENTOS_PI)], QVBoxLayout()
+        lateral.setSpacing(3)
+        lateral.addStretch()
+        for segmento in reversed(self.barra_pi):
+            lateral.addWidget(segmento)
+        lateral.addStretch()
+        caja_pi, self.valor_pi, _ = tarjeta("Índice de perfusión (%)", "#24272b", lateral=lateral)
+        caja_pi.setToolTip(
+            f"Fuerza del pulso: cada segmento equivale a {PI_POR_SEGMENTO} % de PI. "
+            f"Con {SEGMENTOS_BAJOS} segmentos o menos se pone ámbar: el sitio de medición es débil."
+        )
+        self.mostrar_barra_pi(None)
         self.graf_fc, self.curva_fc = grafica("Frecuencia cardiaca", "lpm", AZUL, TENDENCIA)
         self.graf_sat, self.curva_sat = grafica("SpO₂", "%", VERDE, TENDENCIA)
         self.graf_fc.setYRange(40, 160)
@@ -406,45 +486,21 @@ class Panel(QWidget):
         self.zona_fc = zona(self.graf_fc, LIMITES_FC)
         self.zona_sat = zona(self.graf_sat, (SPO2_MINIMA, 100))
 
-        tendencias = QHBoxLayout()
-        tendencias.addWidget(self.graf_fc)
-        tendencias.addWidget(self.graf_sat)
-        izquierda, derecha = QVBoxLayout(), QVBoxLayout()
-        izquierda.addWidget(self.graf_pleth, 2)
-        izquierda.addLayout(tendencias, 1)
-        for elemento in (caja_fc, caja_sat, caja_pi):
-            derecha.addWidget(elemento)
+        izquierda, derecha = QVBoxLayout(), QGridLayout()
+        izquierda.addWidget(self.graf_pleth)
+        for fila, (tendencia, caja) in enumerate(((self.graf_fc, caja_fc), (self.graf_sat, caja_sat), (None, caja_pi))):
+            derecha.addWidget(caja, fila, 0)
+            if tendencia:
+                derecha.addWidget(tendencia, fila, 1)
+            derecha.setRowStretch(fila, 1)
+        derecha.setColumnStretch(0, 1)
+        derecha.setColumnStretch(1, 1)
         cuerpo = QHBoxLayout()
-        cuerpo.addLayout(izquierda, 3)
-        cuerpo.addLayout(derecha, 1)
-        self.flecha = QToolButton(
-            text="Variabilidad del pulso",
-            checkable=True,
-            arrowType=Qt.ArrowType.RightArrow,
-            toolButtonStyle=Qt.ToolButtonStyle.ToolButtonTextBesideIcon,
-            toggled=self.alternar_variabilidad,
-        )
-        self.bloques, bloques = {}, QHBoxLayout()
-        for nombre in HRV:
-            caja, valor, escala, interpretacion = bloque(nombre)
-            self.bloques[nombre] = valor, escala, interpretacion
-            bloques.addWidget(caja)
-        nota = QLabel(
-            "Se estima con el pulso (PPG), no con ECG, y necesita 60 s de señal quieta. Rangos de referencia de "
-            "adultos sanos en reposo (Nunan et al., 2010): varían con la edad y la persona.",
-            wordWrap=True,
-            styleSheet="color: #6b7078; font-size: 12px;",
-        )
-        self.panel_hrv = QWidget(visible=False)
-        contenido = QVBoxLayout(self.panel_hrv)
-        contenido.setContentsMargins(0, 0, 0, 0)
-        contenido.addLayout(bloques)
-        contenido.addWidget(nota)
+        cuerpo.addLayout(izquierda, 5)
+        cuerpo.addLayout(derecha, 4)
         principal = QVBoxLayout(self)
         principal.addLayout(barra)
         principal.addLayout(cuerpo)
-        principal.addWidget(self.flecha, alignment=Qt.AlignmentFlag.AlignLeft)
-        principal.addWidget(self.panel_hrv)
 
         self.hilo = threading.Thread(target=self.leer, args=(fuente,), daemon=True)
         self.hilo.start()
@@ -467,15 +523,15 @@ class Panel(QWidget):
             self.escritor.writerows(nuevas)
         datos = np.array(nuevas, dtype=float)
         if self.inicio is None:
-            self.inicio = datos[0, 0] / FS
+            self.inicio = datos[0, 0]
         self.rojo.extend(datos[:, 1])
         self.ir.extend(datos[:, 2])
         self.ir_hrv.extend(datos[:, 2])
         self.vista.extend(self.filtrar(datos[:, 2]))
         self.ajustar_escala()
-        self.tiempo.extend(datos[:, 0] / FS)
+        self.tiempo.extend((datos[:, 0] - self.inicio) / FS)
         self.curva.setData(np.array(self.tiempo), np.array(self.vista))
-        avanzar(self.graf_pleth, self.inicio, self.tiempo[-1], VENTANA / FS)
+        avanzar(self.graf_pleth, 0, self.tiempo[-1], VENTANA / FS)
         if self.midiendo:
             self.detectar_latidos(len(nuevas))
 
@@ -516,7 +572,7 @@ class Panel(QWidget):
     def calcular(self):
         self.hora.setText(f"{datetime.now():%H:%M:%S}")
         rojo, ir = np.array(self.rojo), np.array(self.ir)
-        calidad = None
+        fiable = False
         if not self.hilo.is_alive():
             estado = "Desconectado"
         elif len(ir) < VENTANA:
@@ -524,58 +580,49 @@ class Panel(QWidget):
         elif ir.min() < DEDO_MINIMO:
             estado = "Sin dedo"
         else:
-            calidad = calidad_senal(ir)
-            estado = "Midiendo" if calidad >= CALIDAD_MINIMA else "Señal poco fiable"
-        self.midiendo = estado == "Midiendo"
+            estado = "Midiendo"
+            fiable = calidad_senal(ir) >= CALIDAD_MINIMA
+        self.midiendo = fiable
         if estado in ("Sin dedo", "Desconectado"):
             self.ir_hrv.clear()
-        self.mostrar_variabilidad()
         if self.ventana_onda.isVisible():
             self.ventana_onda.actualizar(ir if self.midiendo else None, self.tiempo[-1] if self.tiempo else 0)
+            self.ventana_onda.mostrar_variabilidad(self.ir_hrv)
         grabando = f" · <span style='color: {ROJO};'>● GRABANDO</span>" if self.archivo else ""
-        detalle = "" if calidad is None else f" (calidad {calidad:.2f})"
-        self.estado.setText(f"{self.origen} · {estado}{detalle}{grabando}")
+        self.estado.setText(f"{self.origen} · {estado}{grabando}")
 
-        if estado != "Midiendo":
+        if not self.midiendo:
             for valor in (self.valor_fc, self.valor_sat, self.valor_pi):
                 valor.setText("--")
+            self.mostrar_barra_pi(None)
             return
         self.fc.append(frecuencia_cardiaca(ir))
         self.sat.append(spo2(rojo, ir))
         self.valor_fc.setText(f"{self.fc[-1]:.0f}")
         self.valor_sat.setText(f"{self.sat[-1]:.0f}")
-        self.valor_pi.setText(f"{indice_perfusion(ir):.1f}")
+        pi = indice_perfusion(ir)
+        self.valor_pi.setText(f"{pi:.1f}")
+        self.mostrar_barra_pi(pi)
         self.tiempo_tendencia.append(self.tiempo[-1])
         self.curva_fc.setData(list(self.tiempo_tendencia), list(self.fc))
         self.curva_sat.setData(list(self.tiempo_tendencia), list(self.sat))
         for grafica_tendencia in (self.graf_fc, self.graf_sat):
-            avanzar(grafica_tendencia, self.inicio, self.tiempo_tendencia[-1], TENDENCIA)
+            avanzar(grafica_tendencia, 0, self.tiempo_tendencia[-1], TENDENCIA)
 
-    def alternar_variabilidad(self, abierto):
-        self.flecha.setArrowType(Qt.ArrowType.DownArrow if abierto else Qt.ArrowType.RightArrow)
-        self.panel_hrv.setVisible(abierto)
-
-    def mostrar_variabilidad(self):
-        completa = len(self.ir_hrv) == VENTANA_HRV
-        medidas = variabilidad(np.array(self.ir_hrv)) if completa else None
-        for nombre, medida in zip(HRV, medidas or (None, None)):
-            valor, escala, interpretacion = self.bloques[nombre]
-            activa = None if medida is None else zona_hrv(medida, HRV[nombre][1])
-            valor.setText("--" if medida is None else f"{medida:.0f}")
-            for i, etiqueta in enumerate(escala):
-                etiqueta.setStyleSheet(estilo_zona(COLORES_ZONA[i], i == activa))
-            if medida is not None:
-                interpretacion.setText(HRV[nombre][2][activa])
-            elif completa:
-                interpretacion.setText("Señal insuficiente: hay movimiento o ruido.")
-            else:
-                interpretacion.setText(f"Acumulando señal: {len(self.ir_hrv) // FS} / {VENTANA_HRV // FS} s")
+    def mostrar_barra_pi(self, pi):
+        encendidos = 0 if pi is None else segmentos_pi(pi)
+        color = COLORES_ZONA[0] if encendidos <= SEGMENTOS_BAJOS else VERDE
+        for k, segmento in enumerate(self.barra_pi):
+            segmento.setStyleSheet(estilo_segmento(color if k < encendidos else SEGMENTO_APAGADO))
 
     def abrir_onda(self):
-        self.ventana_onda.show()
+        if not self.ventana_onda.isVisible():
+            self.ventana_onda.show()
+            self.ventana_onda.encajar(self.screen().availableGeometry())
         self.ventana_onda.raise_()
         self.ventana_onda.activateWindow()
         self.ventana_onda.actualizar(np.array(self.ir) if self.midiendo else None, self.tiempo[-1] if self.tiempo else 0)
+        self.ventana_onda.mostrar_variabilidad(self.ir_hrv)
 
     def configurar(self):
         ajustes = Ajustes(self, self.zona_fc.getRegion(), self.zona_sat.getRegion()[0])

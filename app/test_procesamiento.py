@@ -18,6 +18,8 @@ for lpm in (40, 72, 150):
     assert abs(frecuencia_cardiaca(ir) - lpm) < 2, lpm
     assert abs(spo2(rojo, ir) - 97.5) < 0.5, lpm
 
+assert spo2(50000 - 100 * onda + ruido[0], ir) == 100
+
 assert calidad_senal(ir[:10 * FS]) > 0.8
 assert calidad_senal(60000 + ruido[1][:10 * FS]) < 0.3
 assert calidad_senal(np.full(10 * FS, 60000.0)) == 0
